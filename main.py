@@ -37,33 +37,50 @@ def now():
 def verify(req: Verify):
     cur.execute("SELECT * FROM licenses WHERE license_key=?", (req.license_key,))
     row = cur.fetchone()
+
     if not row:
         return {"status": "invalid"}
 
-    key, hwid, expires_at, is_active = row
+    license_key, hwid, activated_at, expires_at, is_active = row
+
     if not is_active:
         return {"status": "disabled"}
 
-    if now() > datetime.fromisoformat(expires_at):
+    now_time = now()
+
+    # أول تفعيل
+    if not activated_at:
+        new_expires = now_time + timedelta(days=30)
+        cur.execute("""
+            UPDATE licenses
+            SET hwid=?, activated_at=?, expires_at=?
+            WHERE license_key=?
+        """, (
+            req.hwid,
+            now_time.isoformat(),
+            new_expires.isoformat(),
+            license_key
+        ))
+        conn.commit()
+        return {
+            "status": "ok",
+            "expires_at": new_expires.isoformat(),
+            "first_activation": True
+        }
+
+    # جهاز مختلف
+    if hwid != req.hwid:
+        return {"status": "used_on_other_device"}
+
+    # منتهي
+    if now_time > datetime.fromisoformat(expires_at):
         return {"status": "expired"}
 
-    if hwid and hwid != req.hwid:
-        return {"status": "used"}
-
-    if not hwid:
-        cur.execute(
-            "UPDATE licenses SET hwid=? WHERE license_key=?",
-            (req.hwid, req.license_key)
-        )
-        conn.commit()
-
-    cur.execute("SELECT * FROM usage WHERE license_key=?", (req.license_key,))
-    u = cur.fetchone()
-    if u and u[2] and now() < datetime.fromisoformat(u[2]):
-        seconds = int((datetime.fromisoformat(u[2]) - now()).total_seconds())
-        return {"status": "locked", "seconds_left": seconds}
-
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "expires_at": expires_at,
+        "first_activation": False
+    }
 
 @app.post("/use")
 def use(req: Verify):
