@@ -5,6 +5,7 @@ import sqlite3
 
 app = FastAPI()
 
+# ================= DATABASE =================
 conn = sqlite3.connect("db.sqlite", check_same_thread=False)
 cur = conn.cursor()
 
@@ -12,6 +13,7 @@ cur.execute("""
 CREATE TABLE IF NOT EXISTS licenses (
     license_key TEXT PRIMARY KEY,
     hwid TEXT,
+    activated_at TEXT,
     expires_at TEXT,
     is_active INTEGER
 )
@@ -26,13 +28,21 @@ CREATE TABLE IF NOT EXISTS usage (
 """)
 conn.commit()
 
+# ================= MODELS =================
 class Verify(BaseModel):
     license_key: str
     hwid: str
 
+class CreateLicense(BaseModel):
+    license_key: str
+    secret: str
+
+ADMIN_SECRET = "DEVBAND-SECRET-123"
+
 def now():
     return datetime.utcnow()
 
+# ================= VERIFY =================
 @app.post("/verify")
 def verify(req: Verify):
     cur.execute("SELECT * FROM licenses WHERE license_key=?", (req.license_key,))
@@ -48,7 +58,7 @@ def verify(req: Verify):
 
     now_time = now()
 
-    # أول تفعيل
+    # أول تفعيل (هنا تبدأ 30 يوم)
     if not activated_at:
         new_expires = now_time + timedelta(days=30)
         cur.execute("""
@@ -72,7 +82,7 @@ def verify(req: Verify):
     if hwid != req.hwid:
         return {"status": "used_on_other_device"}
 
-    # منتهي
+    # انتهت المدة
     if now_time > datetime.fromisoformat(expires_at):
         return {"status": "expired"}
 
@@ -82,10 +92,12 @@ def verify(req: Verify):
         "first_activation": False
     }
 
+# ================= USAGE LIMIT =================
 @app.post("/use")
 def use(req: Verify):
     cur.execute("SELECT * FROM usage WHERE license_key=?", (req.license_key,))
     u = cur.fetchone()
+    now_time = now()
 
     if not u:
         cur.execute(
@@ -97,15 +109,15 @@ def use(req: Verify):
 
     _, count, locked_until = u
 
-    if locked_until and now() < datetime.fromisoformat(locked_until):
-        seconds = int((datetime.fromisoformat(locked_until) - now()).total_seconds())
+    if locked_until and now_time < datetime.fromisoformat(locked_until):
+        seconds = int((datetime.fromisoformat(locked_until) - now_time).total_seconds())
         return {"status": "locked", "seconds_left": seconds}
 
     if count >= 5:
-        lock = now() + timedelta(hours=10)
+        lock_time = now_time + timedelta(hours=10)
         cur.execute(
             "UPDATE usage SET locked_until=? WHERE license_key=?",
-            (lock.isoformat(), req.license_key)
+            (lock_time.isoformat(), req.license_key)
         )
         conn.commit()
         return {"status": "locked", "seconds_left": 10 * 3600}
@@ -116,3 +128,16 @@ def use(req: Verify):
     )
     conn.commit()
     return {"status": "allowed", "remaining": 5 - (count + 1)}
+
+# ================= ADMIN (NO SHELL) =================
+@app.post("/admin/create")
+def create_license(data: CreateLicense):
+    if data.secret != ADMIN_SECRET:
+        return {"status": "forbidden"}
+
+    cur.execute(
+        "INSERT OR IGNORE INTO licenses VALUES (?, ?, ?, ?, ?)",
+        (data.license_key, None, None, None, 1)
+    )
+    conn.commit()
+    return {"status": "created"}
